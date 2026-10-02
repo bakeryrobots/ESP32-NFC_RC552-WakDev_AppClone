@@ -782,23 +782,74 @@ const char* pageLabel(uint16_t p) {
   return nullptr;
 }
 
-void showProtection() {
-  byte b[18]; byte sz = sizeof(b);
-  if (mfrc522.MIFARE_Read(2, b, &sz) == MFRC522::STATUS_OK) {
-    if (b[2] == 0xFF && b[3] == 0xFF) Serial.println(F("Lock   : TERKUNCI (read-only)"));
-    else Serial.printf("Lock   : tidak terkunci (%02X %02X)\n", b[2], b[3]);
+// ====================== STATUS KEAMANAN & PROTEKSI ======================
+struct TagSecurity {
+  bool supportsPwd = false;
+  bool isLocked = false;
+  bool pwdActive = false;
+  bool configReadable = true;
+  byte auth0 = 255;
+  String protMode = "none"; // "w" (write-only), "rw" (read & write), "none"
+  byte authLim = 0;
+  bool authenticated = false;
+};
+
+TagSecurity getSecurityInfo() {
+  TagSecurity sec;
+  sec.supportsPwd = (tag.kind == K_UL && tag.cfg != 0);
+  sec.authenticated = authed;
+
+  if (tag.kind == K_UL) {
+    byte b[18]; byte sz = sizeof(b);
+    if (mfrc522.MIFARE_Read(2, b, &sz) == MFRC522::STATUS_OK) {
+      sec.isLocked = (b[2] == 0xFF && b[3] == 0xFF);
+    }
+    if (sec.supportsPwd) {
+      sz = sizeof(b);
+      if (mfrc522.MIFARE_Read(tag.cfg, b, &sz) != MFRC522::STATUS_OK) {
+        // Tag menolak pembacaan config -> password aktif dengan read-protection!
+        sec.pwdActive = true;
+        sec.configReadable = false;
+        sec.protMode = "rw";
+        sec.auth0 = 4;
+        reopen();
+      } else {
+        sec.configReadable = true;
+        sec.auth0 = b[3];
+        byte acc = b[4];
+        if (sec.auth0 < tag.pages) {
+          sec.pwdActive = true;
+          sec.protMode = (acc & 0x80) ? "rw" : "w";
+          sec.authLim = acc & 7;
+        } else {
+          sec.pwdActive = false;
+          sec.protMode = "none";
+        }
+      }
+    }
   }
-  if (!tag.cfg) return;
-  sz = sizeof(b);
-  if (mfrc522.MIFARE_Read(tag.cfg, b, &sz) != MFRC522::STATUS_OK) {
-    Serial.println(F("Password: AKTIF (konfigurasi tidak terbaca) - pakai 'auth <pwd>'"));
-    reopen();
+  return sec;
+}
+
+void showProtection() {
+  TagSecurity sec = getSecurityInfo();
+  if (sec.isLocked) Serial.println(F("Lock    : TERKUNCI PERMANEN (read-only)"));
+  else Serial.println(F("Lock    : Terbuka (bisa ditulis)"));
+
+  if (!sec.supportsPwd) return;
+
+  if (!sec.configReadable) {
+    Serial.println(F("Password: AKTIF (konfigurasi diproteksi baca) - jalankan 'auth <pwd>'"));
     return;
   }
-  byte auth0 = b[3], acc = b[4];
-  if (auth0 >= tag.pages) Serial.println(F("Password: tidak aktif"));
-  else Serial.printf("Password: AKTIF mulai page %u, proteksi %s, batas salah %u (0=tak terbatas)\n",
-                     auth0, (acc & 0x80) ? "BACA+TULIS" : "TULIS saja", acc & 7);
+  if (sec.pwdActive) {
+    Serial.printf("Password: AKTIF mulai page %u, proteksi %s, batas salah %u (0=tak terbatas)\n",
+                  sec.auth0, (sec.protMode == "rw") ? "BACA+TULIS" : "TULIS saja", sec.authLim);
+    if (sec.authenticated) Serial.println(F("Sesi    : TERAUTENTIKASI (kartu terbuka)"));
+    else Serial.println(F("Sesi    : BELUM DIAUTENTIKASI (kartu terkunci)"));
+  } else {
+    Serial.println(F("Password: Tidak aktif (bebas tanpa password)"));
+  }
 }
 
 void cmdSetPwd(String a) {
@@ -1178,6 +1229,7 @@ void handleApiScan() {
     return;
   }
   showNdef();
+  TagSecurity sec = getSecurityInfo();
   String json = "{";
   json += "\"detected\":true,";
   json += "\"uid\":\"" + getUidString() + "\",";
@@ -1188,7 +1240,15 @@ void handleApiScan() {
   String safePayload = lastNdef.payload;
   safePayload.replace("\\", "\\\\");
   safePayload.replace("\"", "\\\"");
-  json += "\"ndef_payload\":\"" + safePayload + "\"";
+  json += "\"ndef_payload\":\"" + safePayload + "\",";
+  json += "\"supports_pwd\":" + String(sec.supportsPwd ? "true" : "false") + ",";
+  json += "\"is_locked\":" + String(sec.isLocked ? "true" : "false") + ",";
+  json += "\"pwd_active\":" + String(sec.pwdActive ? "true" : "false") + ",";
+  json += "\"config_readable\":" + String(sec.configReadable ? "true" : "false") + ",";
+  json += "\"prot_mode\":\"" + sec.protMode + "\",";
+  json += "\"auth0\":" + String(sec.auth0) + ",";
+  json += "\"authlim\":" + String(sec.authLim) + ",";
+  json += "\"authenticated\":" + String(sec.authenticated ? "true" : "false");
   json += "}";
   endTag();
   server.send(200, "application/json", json);
@@ -1204,6 +1264,18 @@ void handleApiWrite() {
 
   if (!prepare()) {
     server.send(200, "application/json", "{\"success\":false,\"message\":\"Tag tidak terdeteksi. Tempelkan kartu ke reader!\"}");
+    return;
+  }
+
+  TagSecurity sec = getSecurityInfo();
+  if (sec.isLocked) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal: Kartu ini telah dikunci permanen (Read-Only) dan tidak dapat ditulisi lagi.\"}");
+    return;
+  }
+  if (sec.pwdActive && !sec.authenticated) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal: Kartu terlindungi password. Buka tab Keamanan dan lakukan Autentikasi terlebih dahulu.\"}");
     return;
   }
 
@@ -1226,7 +1298,7 @@ void handleApiWrite() {
   if (ok) {
     server.send(200, "application/json", "{\"success\":true,\"message\":\"Data NDEF berhasil ditulis ke kartu!\"}");
   } else {
-    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal menulis NDEF (kartu terkunci atau catu 3.3V drop).\"}");
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal menulis NDEF. Jika kartu terlindungi password, buka kunci di tab Keamanan.\"}");
   }
 }
 
@@ -1235,6 +1307,18 @@ void handleApiFormat() {
     server.send(200, "application/json", "{\"success\":false,\"message\":\"Tag tidak terdeteksi.\"}");
     return;
   }
+  TagSecurity sec = getSecurityInfo();
+  if (sec.isLocked) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal: Kartu telah dikunci permanen (Read-Only).\"}");
+    return;
+  }
+  if (sec.pwdActive && !sec.authenticated) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal: Kartu terlindungi password! Buka tab Keamanan dan masukkan password terlebih dahulu.\"}");
+    return;
+  }
+
   bool ok = false;
   if (tag.kind == K_CLASSIC) {
     ok = formatClassicNdef();
@@ -1255,6 +1339,18 @@ void handleApiErase() {
     server.send(200, "application/json", "{\"success\":false,\"message\":\"Tag tidak terdeteksi.\"}");
     return;
   }
+  TagSecurity sec = getSecurityInfo();
+  if (sec.isLocked) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal: Kartu telah dikunci permanen (Read-Only).\"}");
+    return;
+  }
+  if (sec.pwdActive && !sec.authenticated) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal: Kartu terlindungi password! Buka tab Keamanan dan masukkan password terlebih dahulu.\"}");
+    return;
+  }
+
   if (tag.kind == K_CLASSIC) {
     factoryResetClassic();
   } else if (tag.kind == K_UL) {
@@ -1262,6 +1358,210 @@ void handleApiErase() {
   }
   endTag();
   server.send(200, "application/json", "{\"success\":true,\"message\":\"Kartu berhasil direset ke kondisi awal.\"}");
+}
+
+void handleApiSecurity() {
+  if (!prepare()) {
+    server.send(200, "application/json", "{\"detected\":false}");
+    return;
+  }
+  TagSecurity sec = getSecurityInfo();
+  String json = "{";
+  json += "\"detected\":true,";
+  json += "\"uid\":\"" + getUidString() + "\",";
+  json += "\"type\":\"" + String(tag.name) + "\",";
+  json += "\"supports_pwd\":" + String(sec.supportsPwd ? "true" : "false") + ",";
+  json += "\"is_locked\":" + String(sec.isLocked ? "true" : "false") + ",";
+  json += "\"pwd_active\":" + String(sec.pwdActive ? "true" : "false") + ",";
+  json += "\"config_readable\":" + String(sec.configReadable ? "true" : "false") + ",";
+  json += "\"auth0\":" + String(sec.auth0) + ",";
+  json += "\"prot_mode\":\"" + sec.protMode + "\",";
+  json += "\"authlim\":" + String(sec.authLim) + ",";
+  json += "\"authenticated\":" + String(sec.authenticated ? "true" : "false");
+  json += "}";
+  endTag();
+  server.send(200, "application/json", json);
+}
+
+void handleApiAuth() {
+  if (!server.hasArg("pwd")) {
+    server.send(400, "application/json", "{\"success\":false,\"message\":\"Parameter password tidak ada.\"}");
+    return;
+  }
+  String pwdStr = server.arg("pwd");
+  pwdStr.trim();
+  byte bPwd[4];
+  if (!parsePwd(pwdStr, bPwd)) {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Format password salah (harus 4 karakter atau 8 hex, misal: 1234 atau A1B2C3D4).\"}");
+    return;
+  }
+
+  if (!prepare()) {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Tag tidak terdeteksi. Tempelkan kartu ke reader!\"}");
+    return;
+  }
+
+  if (tag.kind != K_UL || !tag.cfg) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Kartu ini bukan NTAG21x (tidak mendukung autentikasi password).\"}");
+    return;
+  }
+
+  byte pack[2];
+  if (ntagAuth(bPwd, pack)) {
+    memcpy(sessPwd, bPwd, 4);
+    sessPwdSet = true;
+    authed = true;
+    char packHex[8];
+    snprintf(packHex, sizeof(packHex), "%02X%02X", pack[0], pack[1]);
+    endTag();
+    server.send(200, "application/json", "{\"success\":true,\"message\":\"Autentikasi berhasil! Kartu terbuka untuk operasi baca/tulis.\",\"pack\":\"" + String(packHex) + "\"}");
+  } else {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Autentikasi gagal! Password salah atau kartu menolak akses.\"}");
+  }
+}
+
+void handleApiUnauth() {
+  sessPwdSet = false;
+  authed = false;
+  server.send(200, "application/json", "{\"success\":true,\"message\":\"Autentikasi sesi dinonaktifkan (kartu terkunci kembali).\"}");
+}
+
+void handleApiSetPwd() {
+  if (!server.hasArg("pwd")) {
+    server.send(400, "application/json", "{\"success\":false,\"message\":\"Password tidak boleh kosong.\"}");
+    return;
+  }
+  String sp = server.arg("pwd");
+  sp.trim();
+  byte pwd[4];
+  if (!parsePwd(sp, pwd)) {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Password harus 4 karakter teks atau 8 digit HEX.\"}");
+    return;
+  }
+
+  String mode = server.hasArg("mode") ? server.arg("mode") : "w";
+  bool rw = mode.equalsIgnoreCase("rw");
+  int auth0 = server.hasArg("auth0") ? server.arg("auth0").toInt() : 4;
+  int lim = server.hasArg("limit") ? server.arg("limit").toInt() : 0;
+
+  if (!prepare()) {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Tag tidak terdeteksi. Tempelkan kartu ke reader!\"}");
+    return;
+  }
+
+  if (tag.kind != K_UL || !tag.cfg) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Tag ini bukan NTAG21x (tidak mendukung password).\"}");
+    return;
+  }
+
+  if (auth0 < 4 || auth0 >= tag.pages || lim < 0 || lim > 7) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Nilai auth0 atau limit tidak valid (auth0: 4..page akhir, limit: 0..7).\"}");
+    return;
+  }
+
+  byte b[18]; byte sz = sizeof(b);
+  if (mfrc522.MIFARE_Read(tag.cfg, b, &sz) != MFRC522::STATUS_OK) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal membaca konfigurasi tag. Jika tag sudah ber-password, lakukan Autentikasi dengan password lama terlebih dahulu!\"}");
+    return;
+  }
+
+  byte c0[4], c1[4], pk[4] = {0x80, 0x80, 0, 0};
+  memcpy(c0, b, 4); memcpy(c1, b + 4, 4);
+  c1[0] = (c1[0] & 0x78) | (rw ? 0x80 : 0x00) | lim;
+  c0[3] = (byte)auth0;
+
+  bool ok = wrPage(tag.cfg + 2, pwd) && 
+            wrPage(tag.cfg + 3, pk) && 
+            wrPage(tag.cfg + 1, c1) && 
+            wrPage(tag.cfg, c0);
+  endTag();
+
+  if (ok) {
+    memcpy(sessPwd, pwd, 4);
+    sessPwdSet = true;
+    authed = true;
+    server.send(200, "application/json", "{\"success\":true,\"message\":\"Password berhasil dipasang! Proteksi: " + String(rw ? "BACA & TULIS" : "HANYA TULIS") + " mulai page " + String(auth0) + ".\"}");
+  } else {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal menulis konfigurasi password ke chip tag.\"}");
+  }
+}
+
+void handleApiRemovePwd() {
+  if (!prepare()) {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Tag tidak terdeteksi. Tempelkan kartu ke reader!\"}");
+    return;
+  }
+
+  if (tag.kind != K_UL || !tag.cfg) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Tag ini bukan NTAG21x.\"}");
+    return;
+  }
+
+  byte b[18]; byte sz = sizeof(b);
+  if (mfrc522.MIFARE_Read(tag.cfg, b, &sz) != MFRC522::STATUS_OK) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Konfigurasi ditolak oleh chip! Tag masih terkunci password. Buka kunci dengan password yang benar terlebih dahulu.\"}");
+    return;
+  }
+
+  byte c0[4], c1[4], ff[4] = {0xFF, 0xFF, 0xFF, 0xFF}, z[4] = {0, 0, 0, 0};
+  memcpy(c0, b, 4); memcpy(c1, b + 4, 4);
+  c0[3] = 0xFF; // Nonaktifkan AUTH0
+  c1[0] &= 0x78; // Matikan PROT dan AUTHLIM
+
+  bool ok = wrPage(tag.cfg, c0) && 
+            wrPage(tag.cfg + 1, c1) && 
+            wrPage(tag.cfg + 2, ff) && 
+            wrPage(tag.cfg + 3, z);
+  endTag();
+
+  if (ok) {
+    sessPwdSet = false;
+    authed = false;
+    server.send(200, "application/json", "{\"success\":true,\"message\":\"Password berhasil dihapus! Tag sekarang bebas tanpa proteksi.\"}");
+  } else {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal menghapus password dari tag (pastikan sudah diautentikasi).\"}");
+  }
+}
+
+void handleApiLock() {
+  if (server.arg("confirm") != "YES") {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Ketik 'YES' untuk konfirmasi penguncian permanen.\"}");
+    return;
+  }
+  if (!prepare()) {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Tag tidak terdeteksi.\"}");
+    return;
+  }
+  if (tag.kind != K_UL) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Fitur lock ini untuk tag NTAG / Ultralight.\"}");
+    return;
+  }
+  byte p2[4];
+  if (!rdPage(2, p2)) {
+    endTag();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal membaca lock bytes (mungkin terproteksi password).\"}");
+    return;
+  }
+  p2[2] = 0xFF; p2[3] = 0xFF;
+  bool ok = wrPage(2, p2);
+  if (ok && tag.dynLock) {
+    byte dl[4] = {0xFF, 0xFF, 0xFF, 0x00};
+    ok = wrPage(tag.dynLock, dl);
+  }
+  endTag();
+  if (ok) {
+    server.send(200, "application/json", "{\"success\":true,\"message\":\"Tag berhasil dikunci permanen (Read-Only). Tidak dapat ditulisi lagi selamanya.\"}");
+  } else {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Gagal mengunci tag.\"}");
+  }
 }
 
 void handleApiDump() {
@@ -1407,6 +1707,12 @@ void setup() {
   server.on("/api/dump", HTTP_GET, handleApiDump);
   server.on("/api/autoscan", HTTP_POST, handleApiAutoScan);
   server.on("/api/autoscan", HTTP_GET, handleApiAutoScan);
+  server.on("/api/security", HTTP_GET, handleApiSecurity);
+  server.on("/api/auth", HTTP_POST, handleApiAuth);
+  server.on("/api/unauth", HTTP_POST, handleApiUnauth);
+  server.on("/api/setpwd", HTTP_POST, handleApiSetPwd);
+  server.on("/api/removepwd", HTTP_POST, handleApiRemovePwd);
+  server.on("/api/lock", HTTP_POST, handleApiLock);
   server.begin();
 
   byte v = mfrc522.PCD_ReadRegister(MFRC522::VersionReg);
