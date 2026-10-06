@@ -189,8 +189,16 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
             <td class="info-val" id="card-type">-</td>
           </tr>
           <tr>
-            <td class="info-label">Kapasitas Pengguna</td>
+            <td class="info-label">Kapasitas Total</td>
             <td class="info-val" id="card-size">-</td>
+          </tr>
+          <tr>
+            <td class="info-label">Ruang Terpakai (Occupied)</td>
+            <td class="info-val" id="card-occupied">-</td>
+          </tr>
+          <tr>
+            <td class="info-label">Sisa Ruang Bebas (Free)</td>
+            <td class="info-val" id="card-free">-</td>
           </tr>
           <tr>
             <td class="info-label">Status Proteksi</td>
@@ -201,6 +209,17 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
             <td class="info-val" id="card-auth-session">-</td>
           </tr>
         </table>
+
+        <!-- Visual Progress Bar Pemakaian Memori -->
+        <div id="memory-bar-wrapper" style="display:none; margin:10px 0 16px 0; background:#f8fafc; padding:10px 12px; border-radius:6px; border:1px solid var(--border);">
+          <div style="display:flex; justify-content:space-between; font-size:0.78rem; color:var(--text-muted); margin-bottom:6px;">
+            <span>Pemakaian Memori: <strong id="memory-percent-text" style="color:var(--text);">0%</strong></span>
+            <span id="memory-usage-text">0 / 0 byte</span>
+          </div>
+          <div style="width:100%; height:7px; background:#e2e8f0; border-radius:4px; overflow:hidden;">
+            <div id="memory-progress-bar" style="width:0%; height:100%; background:var(--orange); transition:width 0.3s ease;"></div>
+          </div>
+        </div>
 
         <div id="ndef-box" style="display:none;" class="ndef-preview">
           <div class="ndef-type" id="ndef-tag-type">Rekaman NDEF</div>
@@ -228,24 +247,80 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           <select id="write-type" onchange="onTypeChange()">
             <option value="url">Link Website (URL)</option>
             <option value="text">Teks Biasa</option>
+            <option value="wifi">Jaringan WiFi (Auto Connect)</option>
+            <option value="review">Google Review (Pop-up Rating 5 Bintang)</option>
+            <option value="geo">Google Maps (Navigasi / Lokasi)</option>
             <option value="tel">Nomor Telepon</option>
             <option value="mail">Alamat Email</option>
           </select>
         </div>
 
-        <div class="form-group" id="group-prefix">
-          <label>Protokol URL</label>
-          <select id="write-prefix">
-            <option value="https://">https:// (Aman / Standar)</option>
-            <option value="https://www.">https://www.</option>
-            <option value="http://">http://</option>
-            <option value="http://www.">http://www.</option>
-          </select>
+        <!-- Form Standar (URL, Teks, Tel, Mail) -->
+        <div id="form-general">
+          <div class="form-group" id="group-prefix">
+            <label>Protokol URL</label>
+            <select id="write-prefix">
+              <option value="https://">https:// (Aman / Standar)</option>
+              <option value="https://www.">https://www.</option>
+              <option value="http://">http://</option>
+              <option value="http://www.">http://www.</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label id="input-label">Alamat Website <span class="label-hint">(tanpa https:// jika sudah dipilih)</span></label>
+            <input type="text" id="write-val" placeholder="contoh: google.com atau instagram.com/profil">
+          </div>
         </div>
 
-        <div class="form-group">
-          <label id="input-label">Alamat Website <span class="label-hint">(tanpa https:// jika sudah dipilih)</span></label>
-          <input type="text" id="write-val" placeholder="contoh: google.com atau instagram.com/profil">
+        <!-- Form Khusus WiFi -->
+        <div id="form-wifi" style="display:none;">
+          <div class="form-group">
+            <label>Nama Jaringan WiFi (SSID)</label>
+            <input type="text" id="wifi-ssid" placeholder="contoh: KopiSenja_FreeWiFi">
+          </div>
+          <div class="form-group">
+            <label>Tipe Keamanan</label>
+            <select id="wifi-auth" onchange="document.getElementById('group-wifi-pass').style.display = (this.value==='nopass')?'none':'block';">
+              <option value="WPA">WPA / WPA2 / WPA3 (Standar)</option>
+              <option value="WEP">WEP</option>
+              <option value="nopass">Tanpa Password (Terbuka)</option>
+            </select>
+          </div>
+          <div class="form-group" id="group-wifi-pass">
+            <label>Password WiFi</label>
+            <input type="text" id="wifi-pass" placeholder="Masukkan password WiFi">
+          </div>
+          <div class="form-group" style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" id="wifi-hidden" style="width:16px; height:16px; cursor:pointer;">
+            <label for="wifi-hidden" style="margin:0; cursor:pointer; font-weight:normal;">Jaringan Tersembunyi (Hidden SSID)</label>
+          </div>
+          <div class="notice" style="margin-top:0; margin-bottom:14px;">
+            Saat kartu di-tap ke HP, smartphone otomatis memunculkan pop-up konfirmasi untuk langsung terhubung ke WiFi tanpa mengetik password.
+          </div>
+        </div>
+
+        <!-- Form Khusus Google Review Rating -->
+        <div id="form-review" style="display:none;">
+          <div class="form-group">
+            <label>Google Place ID atau Link Ulasan Bisnis</label>
+            <input type="text" id="review-input" placeholder="contoh: ChIJN1t_tDeuEmsRUsoyG83frY4 atau https://g.page/r/.../review">
+          </div>
+          <div class="notice" style="margin-top:0; margin-bottom:14px;">
+            <strong>Auto Pop-up Rating 5 Bintang:</strong> Kartu ini saat di-tap oleh pelanggan akan langsung membuka Google Maps / browser dan memunculkan jendela dialog rating bintang 5 seketika tanpa perlu mencari nama toko.<br>
+            <em>Tips:</em> Buka profil Google Bisnis Anda > klik tombol "Minta Ulasan" > salin link atau Place ID-nya ke sini.
+          </div>
+        </div>
+
+        <!-- Form Khusus Google Maps Lokasi -->
+        <div id="form-geo" style="display:none;">
+          <div class="form-group">
+            <label>Koordinat GPS atau Link Google Maps</label>
+            <input type="text" id="geo-input" placeholder="contoh: -6.2088, 106.8456 atau https://maps.app.goo.gl/xxx">
+          </div>
+          <div class="notice" style="margin-top:0; margin-bottom:14px;">
+            Saat kartu di-tap, smartphone langsung membuka aplikasi Google Maps dan menampilkan rute navigasi menuju titik lokasi tersebut.
+          </div>
         </div>
 
         <button class="btn btn-primary btn-block" onclick="writeTag()">Tulis ke Kartu</button>
@@ -391,6 +466,39 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
         <button class="btn btn-danger btn-block" onclick="eraseTag()">Reset & Kosongkan Kartu</button>
         <div id="erase-alert" class="alert"></div>
       </div>
+
+      <!-- Tuning Sensitivitas Antena RC522 -->
+      <div class="card">
+        <div class="card-title">
+          <span>Sensitivitas Antena RC522 (Gain Tuning)</span>
+          <span class="pill pill-orange" id="current-gain-pill">33 dB</span>
+        </div>
+        <p class="card-desc">
+          Atur penguatan sinyal radio frekuensi (RF) pada register receiver MFRC522 untuk menyesuaikan jarak baca dan sensitivitas kartu.
+        </p>
+        <div class="form-group">
+          <label>Tingkat Sensitivitas (Gain)</label>
+          <div class="input-row">
+            <select id="select-gain" style="flex:1;">
+              <option value="18">18 dB — Sangat Rendah (Anti-Interferensi / Jarak Dekat)</option>
+              <option value="23">23 dB — Rendah</option>
+              <option value="33" selected>33 dB — Standar / Rekomendasi (Paling Seimbang & Stabil)</option>
+              <option value="38">38 dB — Sedang Tinggi</option>
+              <option value="43">43 dB — Tinggi (Jarak Lebih Jauh)</option>
+              <option value="48">48 dB — Maksimal (Sensitivitas Ekstrem)</option>
+            </select>
+            <button class="btn btn-primary" style="white-space:nowrap;" onclick="applyGain()">Terapkan</button>
+          </div>
+        </div>
+        <div id="gain-alert" class="alert"></div>
+
+        <div class="notice">
+          <strong>Panduan & Trade-off Nilai Gain:</strong><br>
+          • <strong>Standar 33–38 dB (Rekomendasi):</strong> Paling seimbang. Jarak deteksi ~2–4 cm dengan pembacaan data yang sangat stabil dan bebas distorsi.<br>
+          • <strong>Tinggi / Maksimal 43–48 dB:</strong> Jarak deteksi meningkat (~4–6 cm), sangat bagus untuk stiker NFC tipis atau gantungan kunci kecil. <em>Trade-off:</em> Jika kartu ditempel terlalu rapat/menempel kaca modul, penerima bisa mengalami <em>saturation</em> (kejenuhan sinyal RF) yang menyebabkan kegagalan baca (read timeout) saat ditempel rapat, serta lebih sensitif terhadap riak/noise kabel power 3.3V.<br>
+          • <strong>Rendah 18–23 dB:</strong> Sangat kebal terhadap noise RF dan objek logam di dekat reader, namun kartu harus ditempelkan menempel rapat ke antena.
+        </div>
+      </div>
     </div>
 
     <!-- TAB 5: HEX DUMP -->
@@ -427,31 +535,51 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
       if (tabId === 'security') {
         loadSecurityInfo();
+      } else if (tabId === 'tools') {
+        loadGain();
       }
     }
 
     function onTypeChange() {
       const ty = document.getElementById('write-type').value;
+      const formGeneral = document.getElementById('form-general');
+      const formWifi = document.getElementById('form-wifi');
+      const formReview = document.getElementById('form-review');
+      const formGeo = document.getElementById('form-geo');
       const grpPrefix = document.getElementById('group-prefix');
       const lbl = document.getElementById('input-label');
       const input = document.getElementById('write-val');
 
-      if (ty === 'url') {
-        grpPrefix.style.display = 'block';
-        lbl.innerText = 'Alamat Website';
-        input.placeholder = 'contoh: google.com atau linktr.ee/nama';
-      } else if (ty === 'text') {
-        grpPrefix.style.display = 'none';
-        lbl.innerText = 'Teks Pesan';
-        input.placeholder = 'contoh: Selamat Datang di Booth Kami';
-      } else if (ty === 'tel') {
-        grpPrefix.style.display = 'none';
-        lbl.innerText = 'Nomor Telepon';
-        input.placeholder = 'contoh: +6281234567890';
-      } else if (ty === 'mail') {
-        grpPrefix.style.display = 'none';
-        lbl.innerText = 'Alamat Email';
-        input.placeholder = 'contoh: info@perusahaan.com';
+      formGeneral.style.display = 'none';
+      formWifi.style.display = 'none';
+      formReview.style.display = 'none';
+      formGeo.style.display = 'none';
+
+      if (ty === 'wifi') {
+        formWifi.style.display = 'block';
+      } else if (ty === 'review') {
+        formReview.style.display = 'block';
+      } else if (ty === 'geo') {
+        formGeo.style.display = 'block';
+      } else {
+        formGeneral.style.display = 'block';
+        if (ty === 'url') {
+          grpPrefix.style.display = 'block';
+          lbl.innerText = 'Alamat Website';
+          input.placeholder = 'contoh: google.com atau instagram.com/profil';
+        } else if (ty === 'text') {
+          grpPrefix.style.display = 'none';
+          lbl.innerText = 'Teks Pesan';
+          input.placeholder = 'contoh: Selamat Datang di Booth Kami';
+        } else if (ty === 'tel') {
+          grpPrefix.style.display = 'none';
+          lbl.innerText = 'Nomor Telepon';
+          input.placeholder = 'contoh: +6281234567890';
+        } else if (ty === 'mail') {
+          grpPrefix.style.display = 'none';
+          lbl.innerText = 'Alamat Email';
+          input.placeholder = 'contoh: info@perusahaan.com';
+        }
       }
     }
 
@@ -520,6 +648,8 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           lastWebScannedUid = "";
           document.getElementById('card-presence-pill').className = 'pill pill-gray';
           document.getElementById('card-presence-pill').innerText = 'Menunggu Kartu...';
+          const memWrap = document.getElementById('memory-bar-wrapper');
+          if (memWrap) memWrap.style.display = 'none';
         }
       } catch (e) {}
     }
@@ -536,8 +666,12 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
           document.getElementById('card-uid').innerText = '-';
           document.getElementById('card-type').innerText = '-';
           document.getElementById('card-size').innerText = '-';
+          document.getElementById('card-occupied').innerText = '-';
+          document.getElementById('card-free').innerText = '-';
           document.getElementById('card-prot').innerText = '-';
           document.getElementById('card-auth-session').innerText = '-';
+          const memWrap = document.getElementById('memory-bar-wrapper');
+          if (memWrap) memWrap.style.display = 'none';
           document.getElementById('ndef-box').style.display = 'none';
           return;
         }
@@ -554,6 +688,21 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       document.getElementById('card-uid').innerText = d.uid;
       document.getElementById('card-type').innerText = d.type;
       document.getElementById('card-size').innerText = d.size + ' byte';
+
+      const occupied = (d.occupied_bytes !== undefined) ? d.occupied_bytes : 0;
+      const free = (d.free_bytes !== undefined) ? d.free_bytes : Math.max(0, d.size - occupied);
+      const pct = d.size > 0 ? Math.min(100, Math.round((occupied / d.size) * 100)) : 0;
+
+      document.getElementById('card-occupied').innerHTML = occupied + ' byte <span style="font-size:0.75rem; color:var(--text-muted);">(' + pct + '%)</span>';
+      document.getElementById('card-free').innerText = free + ' byte';
+
+      const memWrap = document.getElementById('memory-bar-wrapper');
+      if (memWrap && d.size > 0) {
+        memWrap.style.display = 'block';
+        document.getElementById('memory-percent-text').innerText = pct + '%';
+        document.getElementById('memory-usage-text').innerText = occupied + ' / ' + d.size + ' byte';
+        document.getElementById('memory-progress-bar').style.width = pct + '%';
+      }
 
       // Status Proteksi
       let protHtml = '<span class="pill pill-green">Bebas Tanpa Proteksi</span>';
@@ -593,18 +742,55 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 
     async function writeTag() {
       const ty = document.getElementById('write-type').value;
-      const rawVal = document.getElementById('write-val').value.trim();
-      if (!rawVal) {
-        showAlert('write-alert', 'error', '[Peringatan] Harap isi data terlebih dahulu.');
-        return;
-      }
-      let finalVal = rawVal;
-      if (ty === 'url') {
-        const pfx = document.getElementById('write-prefix').value;
-        if (!finalVal.startsWith('http://') && !finalVal.startsWith('https://')) {
-          finalVal = pfx + finalVal;
+      let finalVal = "";
+
+      if (ty === 'wifi') {
+        const ssid = document.getElementById('wifi-ssid').value.trim();
+        const auth = document.getElementById('wifi-auth').value;
+        const pass = document.getElementById('wifi-pass').value;
+        const hidden = document.getElementById('wifi-hidden').checked;
+        if (!ssid) {
+          showAlert('write-alert', 'error', '[Peringatan] Nama WiFi (SSID) tidak boleh kosong.');
+          return;
+        }
+        finalVal = "WIFI:S:" + ssid + ";T:" + auth + ";P:" + (auth === 'nopass' ? '' : pass) + ";H:" + (hidden ? 'true' : 'false') + ";;";
+      } else if (ty === 'review') {
+        const rev = document.getElementById('review-input').value.trim();
+        if (!rev) {
+          showAlert('write-alert', 'error', '[Peringatan] Masukkan Place ID atau link ulasan Google.');
+          return;
+        }
+        if (rev.startsWith('http://') || rev.startsWith('https://')) {
+          finalVal = rev;
+        } else {
+          finalVal = "https://search.google.com/local/writereview?placeid=" + rev;
+        }
+      } else if (ty === 'geo') {
+        const geo = document.getElementById('geo-input').value.trim();
+        if (!geo) {
+          showAlert('write-alert', 'error', '[Peringatan] Masukkan koordinat atau link Google Maps.');
+          return;
+        }
+        if (geo.startsWith('http://') || geo.startsWith('https://')) {
+          finalVal = geo;
+        } else {
+          finalVal = "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(geo);
+        }
+      } else {
+        const rawVal = document.getElementById('write-val').value.trim();
+        if (!rawVal) {
+          showAlert('write-alert', 'error', '[Peringatan] Harap isi data terlebih dahulu.');
+          return;
+        }
+        finalVal = rawVal;
+        if (ty === 'url') {
+          const pfx = document.getElementById('write-prefix').value;
+          if (!finalVal.startsWith('http://') && !finalVal.startsWith('https://')) {
+            finalVal = pfx + finalVal;
+          }
         }
       }
+
       showAlert('write-alert', 'info', '[Info] Menulis data ke kartu... Jangan geser kartu.');
       try {
         const res = await fetch('/api/write', {
@@ -810,8 +996,41 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
       }
     }
 
+    async function loadGain() {
+      try {
+        const res = await fetch('/api/gain');
+        const d = await res.json();
+        if (d.gain_db) {
+          document.getElementById('select-gain').value = String(d.gain_db);
+          document.getElementById('current-gain-pill').innerText = d.gain_db + ' dB';
+        }
+      } catch (e) {}
+    }
+
+    async function applyGain() {
+      const db = document.getElementById('select-gain').value;
+      showAlert('gain-alert', 'info', '[Info] Menerapkan pengaturan gain antena...');
+      try {
+        const res = await fetch('/api/gain', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'db=' + encodeURIComponent(db)
+        });
+        const d = await res.json();
+        if (d.success) {
+          showAlert('gain-alert', 'success', '[Sukses] Sensitivitas antena diatur ke ' + d.gain_db + ' dB.');
+          document.getElementById('current-gain-pill').innerText = d.gain_db + ' dB';
+        } else {
+          showAlert('gain-alert', 'error', '[Gagal] Gagal mengatur gain antena.');
+        }
+      } catch (e) {
+        showAlert('gain-alert', 'error', '[Error] Terjadi kesalahan komunikasi.');
+      }
+    }
+
     window.addEventListener('load', () => {
       startAutoScan();
+      loadGain();
     });
   </script>
 </body>

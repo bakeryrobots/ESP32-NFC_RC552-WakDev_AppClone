@@ -61,6 +61,17 @@ struct TagInfo {
   byte sectors;
 };
 
+struct TagSecurity {
+  bool supportsPwd = false;
+  bool isLocked = false;
+  bool pwdActive = false;
+  bool configReadable = true;
+  byte auth0 = 255;
+  String protMode = "none"; // "w" (write-only), "rw" (read & write), "none"
+  byte authLim = 0;
+  bool authenticated = false;
+};
+
 struct NtagDef { 
   byte type, size; 
   const char* name; 
@@ -117,8 +128,11 @@ byte curGain = 0x40; // 33 dB
 
 struct NdefRecordInfo {
   bool found;
-  String type;      // "URI", "Text", "MIME", "Raw"
-  String payload;   // "https://google.com", dll.
+  String type;          // "URI", "Text", "MIME", "Raw"
+  String payload;       // "https://google.com", dll.
+  size_t payloadBytes;  // Panjang data NDEF payload (byte)
+  size_t occupiedBytes; // Total byte memori terpakai (termasuk TLV header & terminator 0xFE)
+  size_t freeBytes;     // Sisa kapasitas memori bebas (byte)
 };
 NdefRecordInfo lastNdef;
 
@@ -135,6 +149,7 @@ const char* TAGCMDS = " scan dump read write wtext wurl wuri wtel wmail wmime er
 bool selectTag(unsigned long timeoutMs = 80);
 void endTag();
 void showNdef();
+TagSecurity getSecurityInfo();
 bool classicAuth(int block);
 int sectorFirst(int s);
 int sectorBlocks(int s);
@@ -461,15 +476,27 @@ void showNdef() {
   } else {
     Serial.println(F("NDEF   : jenis kartu tidak didukung"));
     lastNdef.found = false;
+    lastNdef.payloadBytes = 0;
+    lastNdef.occupiedBytes = 0;
+    lastNdef.freeBytes = 0;
     return;
   }
 
   size_t st, len, end;
   if (findNdef(mem, bytesTotal, st, len, end)) {
+    lastNdef.payloadBytes = len;
+    lastNdef.occupiedBytes = end;
+    lastNdef.freeBytes = (bytesTotal >= end) ? (bytesTotal - end) : 0;
     decodeNdef(mem + st, len);
+    Serial.printf("Memori : %u byte terpakai / %u byte total (sisa %u byte - %u%%)\n",
+                  (unsigned)lastNdef.occupiedBytes, (unsigned)bytesTotal, (unsigned)lastNdef.freeBytes,
+                  bytesTotal > 0 ? (unsigned)((lastNdef.occupiedBytes * 100) / bytesTotal) : 0);
   } else {
     Serial.println(F("NDEF   : kosong (belum ada rekaman)"));
     lastNdef.found = false;
+    lastNdef.payloadBytes = 0;
+    lastNdef.occupiedBytes = 0;
+    lastNdef.freeBytes = bytesTotal;
   }
 }
 
@@ -783,17 +810,6 @@ const char* pageLabel(uint16_t p) {
 }
 
 // ====================== STATUS KEAMANAN & PROTEKSI ======================
-struct TagSecurity {
-  bool supportsPwd = false;
-  bool isLocked = false;
-  bool pwdActive = false;
-  bool configReadable = true;
-  byte auth0 = 255;
-  String protMode = "none"; // "w" (write-only), "rw" (read & write), "none"
-  byte authLim = 0;
-  bool authenticated = false;
-};
-
 TagSecurity getSecurityInfo() {
   TagSecurity sec;
   sec.supportsPwd = (tag.kind == K_UL && tag.cfg != 0);
@@ -1235,6 +1251,9 @@ void handleApiScan() {
   json += "\"uid\":\"" + getUidString() + "\",";
   json += "\"type\":\"" + String(tag.name) + "\",";
   json += "\"size\":" + String(userBytes()) + ",";
+  json += "\"occupied_bytes\":" + String(lastNdef.occupiedBytes) + ",";
+  json += "\"free_bytes\":" + String(lastNdef.freeBytes) + ",";
+  json += "\"payload_bytes\":" + String(lastNdef.payloadBytes) + ",";
   json += "\"ndef_found\":" + String(lastNdef.found ? "true" : "false") + ",";
   json += "\"ndef_type\":\"" + lastNdef.type + "\",";
   String safePayload = lastNdef.payload;
@@ -1280,7 +1299,7 @@ void handleApiWrite() {
   }
 
   bool ok = false;
-  if (ty == "url" || ty == "uri") {
+  if (ty == "url" || ty == "uri" || ty == "wifi" || ty == "geo" || ty == "review") {
     cmdWUri(val);
     ok = lastNdef.found;
   } else if (ty == "text") {
@@ -1631,6 +1650,32 @@ void handleApiAutoScan() {
   server.send(200, "application/json", json);
 }
 
+void handleApiGain() {
+  if (server.hasArg("db")) {
+    int db = server.arg("db").toInt();
+    for (int i = 0; i < NGAIN; i++) {
+      if (GAIN_DB[i] == db) {
+        curGain = GAIN_VAL[i];
+        mfrc522.PCD_SetAntennaGain(curGain);
+        break;
+      }
+    }
+  }
+  int currentDb = 33;
+  for (int i = 0; i < NGAIN; i++) {
+    if (GAIN_VAL[i] == curGain) {
+      currentDb = GAIN_DB[i];
+      break;
+    }
+  }
+  String json = "{";
+  json += "\"success\":true,";
+  json += "\"gain_db\":" + String(currentDb) + ",";
+  json += "\"raw_reg\":\"0x" + String(curGain, HEX) + "\"";
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
 void handleAutoScan() {
   if (!autoScanEnabled) return;
 
@@ -1713,6 +1758,8 @@ void setup() {
   server.on("/api/setpwd", HTTP_POST, handleApiSetPwd);
   server.on("/api/removepwd", HTTP_POST, handleApiRemovePwd);
   server.on("/api/lock", HTTP_POST, handleApiLock);
+  server.on("/api/gain", HTTP_GET, handleApiGain);
+  server.on("/api/gain", HTTP_POST, handleApiGain);
   server.begin();
 
   byte v = mfrc522.PCD_ReadRegister(MFRC522::VersionReg);
